@@ -5,8 +5,6 @@ const CONFIG = {
   support: 'https://sbkbmwsavszewsyxcqoz.supabase.co/functions/v1/support',
 };
 
-const form = document.getElementById('signup-form');
-
 // تبدیل اعداد فارسی/عربی به انگلیسی
 const toEn = s => s.replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d));
 
@@ -17,66 +15,35 @@ const sendForm = async (f, data, tell, success) => {
   button.disabled = true;
   tell('در حال ارسال…');
   try {
+    const token = await SafiranAuth.token();
     const r = await fetch(CONFIG.endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify(data),
     });
     if (r.status === 429) {
       tell('درخواست‌های زیادی فرستاده شده است. لطفاً کمی بعد دوباره امتحان کنید.', true);
+    } else if (r.status === 401) {
+      await SafiranAuth.signOut();
+      tell('برای ارسال فرم باید دوباره وارد حساب خود شوید. در حال انتقال به صفحه‌ی ورود…', true);
+      location.href = `login.html?next=${encodeURIComponent(location.pathname.split('/').pop() || 'index.html')}`;
+      return false;
+    } else if (r.status === 403) {
+      tell('این حساب مسدود شده است. برای پیگیری با مؤسسه تماس بگیرید.', true);
     } else if (!r.ok) {
       throw new Error(r.status);
     } else {
       f.reset();
+      SafiranAuth.prefill(f);
       tell(success);
       sent = true;
     }
   } catch {
-    tell(`ارسال انجام نشد. لطفاً با شماره‌ی ${CONFIG.phone} تماس بگیرید.`, true);
+    tell('ارسال انجام نشد. لطفاً چند دقیقه‌ی دیگر دوباره امتحان کنید یا در اینستاگرام برای ما پیام بدهید.', true);
   }
   button.disabled = false;
   return sent;
 };
-
-if (form) {
-// خدمتی که روی کارتش زده شده از قبل انتخاب شود
-const wanted = new URLSearchParams(location.search).get('service');
-if (wanted) form.service.value = wanted;
-
-const msg = form.querySelector('.form__msg');
-const say = (text, err) => { msg.textContent = text; msg.classList.toggle('err', !!err); };
-
-form.addEventListener('submit', async e => {
-  e.preventDefault();
-  const data = {
-    kind: 'signup',
-    name: form.name.value.trim(),
-    phone: toEn(form.phone.value).replace(/[\s-]/g, ''),
-    service: form.service.value,
-    mode: form.mode.value,
-    note: form.note.value.trim(),
-    website: form.website.value,
-    consent: form.consent.checked,
-  };
-  const bad = [];
-  if (data.name.length < 2) bad.push(form.name);
-  if (!/^(\+98|0098|0)?9\d{9}$/.test(data.phone)) bad.push(form.phone);
-  if (!data.service) bad.push(form.service);
-  [form.name, form.phone, form.service].forEach(el => el.setAttribute('aria-invalid', bad.includes(el)));
-  if (bad.length) {
-    say('لطفاً نام، شماره‌ی موبایل درست و خدمت موردنظر را وارد کنید.', true);
-    bad[0].focus();
-    return;
-  }
-  if (!data.consent) {
-    say('برای ثبت، لطفاً تیک موافقت را بزنید.', true);
-    form.consent.focus();
-    return;
-  }
-  await sendForm(form, data, say, 'درخواست شما ثبت شد. به‌زودی با شما تماس می‌گیریم. 🌿');
-});
-
-}
 
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -117,36 +84,56 @@ if (document.getElementById('quiz')) {
     clearAll();
     render(`<img class="quiz__hero" src="img/popper.webp" alt="">
       <h2>یک بازی کوتاه قرآنی</h2>
-      <p>پنج سؤال ساده با چهار گزینه. اگر هر پنج سؤال را درست جواب بدهید، برنده‌اید!</p>
+      <p>پنج سؤال ساده با چهار گزینه. تا یک اشتباه مجاز است؛ با اشتباه دوم از بازی حذف می‌شوید. اگر تا آخر بمانید، برنده‌اید!</p>
       <div class="quiz__row">
         <button type="button" class="button primary" data-act="start">شروع بازی</button>
         <button type="button" class="quiz__skip" data-act="close">رد شدن و ورود به سایت</button>
       </div>`);
   };
 
+  // دو اشتباه مجاز است؛ اشتباه دوم یعنی حذف
+  const MAX_MISTAKES = 2;
+  let results = [];
+
   const ask = i => {
     const item = QUESTIONS[i];
-    const steps = QUESTIONS.map((_, n) => `<i class="${n < i ? 'done' : ''}"></i>`).join('');
+    const mistakes = results.filter(r => !r).length;
+    const steps = QUESTIONS.map((_, n) => `<i class="${n < i ? (results[n] ? 'done' : 'wrong') : ''}"></i>`).join('');
+    const hearts = Array.from({ length: MAX_MISTAKES }, (_, n) => `<span class="${n < mistakes ? 'lost' : ''}" aria-hidden="true">♥</span>`).join('');
     const opts = shuffle([item.a, ...item.o]).map(t => `<button type="button" class="quiz__opt" data-opt="${t}">${t}</button>`).join('');
     render(`<div class="quiz__steps">${steps}</div>
       <div class="quiz__num">سؤال ${faNum(i + 1)} از ${faNum(QUESTIONS.length)}</div>
+      <div class="quiz__lives" aria-label="فرصت باقی‌مانده: ${faNum(MAX_MISTAKES - mistakes)} از ${faNum(MAX_MISTAKES)}">${hearts}</div>
       <div class="quiz__q">${item.q}</div>
-      <div class="quiz__opts">${opts}</div>`);
+      <div class="quiz__opts">${opts}</div>
+      <p class="quiz__fb" role="status"></p>`);
+    const fb = card.querySelector('.quiz__fb');
     card.querySelectorAll('.quiz__opt').forEach(b => b.addEventListener('click', () => {
-      card.querySelectorAll('.quiz__opt').forEach(x => { x.disabled = true; });
-      if (b.dataset.opt === item.a) {
-        b.classList.add('ok');
-        later(() => (i + 1 < QUESTIONS.length ? ask(i + 1) : win()), 650);
-      } else {
-        b.classList.add('bad');
-        later(lose, 800);
+      const all = card.querySelectorAll('.quiz__opt');
+      all.forEach(x => { x.disabled = true; });
+      const right = b.dataset.opt === item.a;
+      results[i] = right;
+      b.classList.add(right ? 'ok' : 'bad');
+      if (!right) {
+        // جواب درست همان لحظه سبز می‌شود
+        all.forEach(x => { if (x.dataset.opt === item.a) x.classList.add('ok', 'reveal'); });
+        const left = MAX_MISTAKES - results.filter(r => !r).length;
+        const live = [...card.querySelectorAll('.quiz__lives span')];
+        live[Math.min(MAX_MISTAKES - left - 1, live.length - 1)].classList.add('lost');
+        fb.textContent = `جواب درست: ${item.a}` + (left > 0 ? ` | ${faNum(left)} فرصت باقی مانده` : '');
       }
+      const mistakesNow = results.filter(r => !r).length;
+      later(() => {
+        if (mistakesNow >= MAX_MISTAKES) lose();
+        else if (i + 1 < QUESTIONS.length) ask(i + 1);
+        else win();
+      }, right ? 650 : 2200);
     }));
   };
 
   const lose = () => {
     render(`<h2>شما موفق نشدید متاسفانه</h2>
-      <p>اشکالی ندارد، می‌توانید دوباره امتحان کنید.</p>
+      <p>دو اشتباه کردید و از بازی حذف شدید. اشکالی ندارد، می‌توانید دوباره امتحان کنید.</p>
       <div class="quiz__row">
         <button type="button" class="button primary" data-act="start">دوباره امتحان کنید</button>
         <button type="button" class="quiz__skip" data-act="close">ورود به سایت</button>
@@ -154,9 +141,10 @@ if (document.getElementById('quiz')) {
   };
 
   const win = () => {
+    const mistakes = results.filter(r => !r).length;
     render(`<img class="quiz__hero" src="img/popper.webp" alt="">
       <h2>تبریک! شما برنده شدید</h2>
-      <p>هر پنج سؤال را درست جواب دادید.</p>
+      <p>${mistakes ? 'با یک اشتباه به پایان رساندید.' : 'هر پنج سؤال را درست جواب دادید.'}</p>
       <div class="quiz__row"><button type="button" class="button primary" data-act="close">ورود به سایت</button></div>`);
     if (reduceMotion) return;
     party.innerHTML = '<img class="trumpet trumpet--r" src="img/trumpet.webp" alt=""><img class="trumpet trumpet--l" src="img/trumpet.webp" alt="">';
@@ -171,7 +159,7 @@ if (document.getElementById('quiz')) {
 
   card.addEventListener('click', e => {
     const act = e.target.dataset.act;
-    if (act === 'start') { clearAll(); ask(0); }
+    if (act === 'start') { clearAll(); results = []; ask(0); }
     if (act === 'close') close();
   });
   dialog.addEventListener('close', clearAll);
